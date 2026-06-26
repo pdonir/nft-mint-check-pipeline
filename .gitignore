@@ -1,0 +1,40 @@
+# Sensitive config (real values — use .example.json templates)
+wallets.json
+list_nft.json
+twitter_cookies.json
+*.cookies.json
+.env
+*.env
+.*.env
+
+# Generated data (changes every run)
+scraped_links.json
+upcoming_mints.json
+last_elig_report.txt
+*.bak
+*.log
+*_state.json
+*_skipped.log
+opensea_api_errors.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Debug / backup scripts
+debug_scraper*.py
+mint_pipeline_backup.py
+run_pipeline_backup.sh
+
+# Local-only OpenSea detector/guard scripts
+opensea_*detector*.py
+opensea_*guard_wrapper.py
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
