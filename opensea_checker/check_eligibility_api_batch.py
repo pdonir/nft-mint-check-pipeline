@@ -16,7 +16,30 @@ LOG_PATH = BASE_DIR / "opensea_api_errors.log"
 
 
 def wallet_display_name(wallet_key: str) -> str:
+    if wallet_key in _DISPLAY_MAP:
+        return _DISPLAY_MAP[wallet_key]
     return wallet_key.replace("_", " ").replace("-", " ").title()
+
+
+def _load_wallet_display_map() -> Dict[str, str]:
+    """Read display labels from this repo's ``wallets.json``.
+
+    ``wallets.json`` maps lowercase wallet keys to a ``display`` field used
+    for human-friendly Telegram output. Falls back to an empty map if the
+    file is missing or malformed.
+    """
+    wallets_path = BASE_DIR / "wallets.json"
+    if not wallets_path.exists():
+        return {}
+    try:
+        import json as _json
+        data = _json.loads(wallets_path.read_text())
+        return {k: v.get("display", k) for k, v in data.items() if isinstance(v, dict)}
+    except Exception:
+        return {}
+
+
+_DISPLAY_MAP = _load_wallet_display_map()
 
 
 def log_error(message: str) -> None:
