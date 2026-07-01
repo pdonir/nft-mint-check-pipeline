@@ -9,6 +9,7 @@ Commands:
 from __future__ import annotations
 
 import difflib
+import fcntl
 import json
 import os
 import re
@@ -40,6 +41,7 @@ ADMIN_USER_IDS = {item.strip() for item in os.environ.get("UPCOMING_NOTIFIER_ADM
 PIPELINE_COMMAND = os.environ.get("UPCOMING_PIPELINE_COMMAND", "python3 nft_mint_check.py")
 PIPELINE_TIMEOUT = int(os.environ.get("UPCOMING_PIPELINE_TIMEOUT", "1800"))
 PIPELINE_LOG_FILE = Path(os.environ.get("UPCOMING_PIPELINE_LOG_FILE", str(BASE_DIR / "upcoming_pipeline_manual.log")))
+PIPELINE_LOCK_FILE = Path(os.environ.get("NFT_MINT_CHECK_LOCK_FILE", "/tmp/nft_mint_check.lock"))
 PIPELINE_LOCK = threading.Lock()
 PIPELINE_RUNNING = False
 
@@ -461,9 +463,35 @@ def is_admin_user(user_id: int | str | None) -> bool:
     return str(user_id or "") in ADMIN_USER_IDS
 
 
+def try_acquire_pipeline_file_lock():
+    PIPELINE_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(PIPELINE_LOCK_FILE, "w", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    fh.write(f"pid={os.getpid()} started={datetime.now(LOCAL_TZ).isoformat(timespec='seconds')}\n")
+    fh.flush()
+    return fh
+
+
+def release_pipeline_file_lock(fh) -> None:
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    finally:
+        fh.close()
+
+
 def pipeline_is_running() -> bool:
     with PIPELINE_LOCK:
-        return PIPELINE_RUNNING
+        if PIPELINE_RUNNING:
+            return True
+    fh = try_acquire_pipeline_file_lock()
+    if fh is None:
+        return True
+    release_pipeline_file_lock(fh)
+    return False
 
 
 def set_pipeline_running(value: bool) -> None:
@@ -479,7 +507,7 @@ def tail_text(text: str, limit: int = 900) -> str:
     return "..." + text[-limit:]
 
 
-def run_pipeline_worker(chat_id: int | str, thread_id: int | None) -> None:
+def run_pipeline_worker(chat_id: int | str, thread_id: int | None, lock_fh) -> None:
     started = time.time()
     try:
         cmd = shlex.split(PIPELINE_COMMAND)
@@ -515,6 +543,7 @@ def run_pipeline_worker(chat_id: int | str, thread_id: int | None) -> None:
         send_message(chat_id, f"❌ Gagal menjalankan NFT Mint Check: `{exc}`", thread_id=thread_id)
         log(f"pipeline exception: {exc}")
     finally:
+        release_pipeline_file_lock(lock_fh)
         set_pipeline_running(False)
 
 
@@ -523,8 +552,11 @@ def start_pipeline(chat_id: int | str, thread_id: int | None) -> bool:
         global PIPELINE_RUNNING
         if PIPELINE_RUNNING:
             return False
+        lock_fh = try_acquire_pipeline_file_lock()
+        if lock_fh is None:
+            return False
         PIPELINE_RUNNING = True
-    thread = threading.Thread(target=run_pipeline_worker, args=(chat_id, thread_id), daemon=True)
+    thread = threading.Thread(target=run_pipeline_worker, args=(chat_id, thread_id, lock_fh), daemon=True)
     thread.start()
     return True
 
