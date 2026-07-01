@@ -12,6 +12,9 @@ import difflib
 import json
 import os
 import re
+import shlex
+import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -33,6 +36,12 @@ UPCOMING_MINTS_THREAD_ID = os.environ.get("UPCOMING_MINTS_THREAD_ID", TELEGRAM_M
 UPCOMING_MINTS_ALLOWED_THREAD_IDS = os.environ.get("UPCOMING_MINTS_ALLOWED_THREAD_IDS", UPCOMING_MINTS_THREAD_ID)
 POLL_TIMEOUT = int(os.environ.get("TELEGRAM_POLL_TIMEOUT", "30"))
 MAX_RESULTS = int(os.environ.get("UPCOMING_NOTIFIER_MAX_RESULTS", "12"))
+ADMIN_USER_IDS = {item.strip() for item in os.environ.get("UPCOMING_NOTIFIER_ADMIN_USER_IDS", "").split(",") if item.strip()}
+PIPELINE_COMMAND = os.environ.get("UPCOMING_PIPELINE_COMMAND", "python3 nft_mint_check.py")
+PIPELINE_TIMEOUT = int(os.environ.get("UPCOMING_PIPELINE_TIMEOUT", "1800"))
+PIPELINE_LOG_FILE = Path(os.environ.get("UPCOMING_PIPELINE_LOG_FILE", str(BASE_DIR / "upcoming_pipeline_manual.log")))
+PIPELINE_LOCK = threading.Lock()
+PIPELINE_RUNNING = False
 
 
 def _detect_local_tz():
@@ -368,7 +377,9 @@ def usage(command: str | None = None) -> str:
         "`/today <wallet/account>`\n"
         "Contoh: `/today DXYM 01`, `/today Wolfhead`\n\n"
         "`/slug <project/link/slug>[, project2] [--wallet <wallet/account>]`\n"
-        "Contoh: `/slug veilsofcolors`, `/slug veilsofcolors --wallet DXYM 01`, `/slug veilsofcolors, neokitsune wolfhead`"
+        "Contoh: `/slug veilsofcolors`, `/slug veilsofcolors --wallet DXYM 01`, `/slug veilsofcolors, neokitsune wolfhead`\n\n"
+        "`/runcheck` atau `/runcheck status`\n"
+        "Admin only: jalankan full NFT Mint Check pipeline."
     )
     return text
 
@@ -444,15 +455,100 @@ def parse_command(text: str) -> tuple[str, str] | None:
     return cmd, rest.strip()
 
 
-def handle_command(text: str) -> str | None:
+def is_admin_user(user_id: int | str | None) -> bool:
+    if not ADMIN_USER_IDS:
+        return False
+    return str(user_id or "") in ADMIN_USER_IDS
+
+
+def pipeline_is_running() -> bool:
+    with PIPELINE_LOCK:
+        return PIPELINE_RUNNING
+
+
+def set_pipeline_running(value: bool) -> None:
+    global PIPELINE_RUNNING
+    with PIPELINE_LOCK:
+        PIPELINE_RUNNING = value
+
+
+def tail_text(text: str, limit: int = 900) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return "..." + text[-limit:]
+
+
+def run_pipeline_worker(chat_id: int | str, thread_id: int | None) -> None:
+    started = time.time()
+    try:
+        cmd = shlex.split(PIPELINE_COMMAND)
+        if not cmd:
+            raise RuntimeError("UPCOMING_PIPELINE_COMMAND kosong")
+        PIPELINE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        log(f"pipeline started: {PIPELINE_COMMAND}")
+        result = subprocess.run(
+            cmd,
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True,
+            timeout=PIPELINE_TIMEOUT,
+        )
+        elapsed = int(time.time() - started)
+        output = "\n".join(part for part in [result.stdout, result.stderr] if part)
+        with open(PIPELINE_LOG_FILE, "a", encoding="utf-8") as fh:
+            fh.write(f"\n===== manual run {datetime.now(LOCAL_TZ).isoformat(timespec='seconds')} =====\n")
+            fh.write(output)
+            fh.write(f"\nexit_code={result.returncode} elapsed={elapsed}s\n")
+        if result.returncode == 0:
+            send_message(chat_id, f"✅ NFT Mint Check selesai dalam {elapsed}s. Laporan sudah dikirim ke topic Upcoming Mints.", thread_id=thread_id)
+            log(f"pipeline done exit=0 elapsed={elapsed}s")
+        else:
+            send_message(chat_id, f"❌ NFT Mint Check gagal (exit {result.returncode}) setelah {elapsed}s.\n\n```\n{tail_text(output)}\n```", thread_id=thread_id)
+            log(f"pipeline failed exit={result.returncode} elapsed={elapsed}s")
+    except subprocess.TimeoutExpired as exc:
+        elapsed = int(time.time() - started)
+        raw_output = "\n".join(str(part) for part in [exc.stdout or "", exc.stderr or ""] if part)
+        send_message(chat_id, f"⏱️ NFT Mint Check timeout setelah {elapsed}s.\n\n```\n{tail_text(raw_output)}\n```", thread_id=thread_id)
+        log(f"pipeline timeout elapsed={elapsed}s")
+    except Exception as exc:
+        send_message(chat_id, f"❌ Gagal menjalankan NFT Mint Check: `{exc}`", thread_id=thread_id)
+        log(f"pipeline exception: {exc}")
+    finally:
+        set_pipeline_running(False)
+
+
+def start_pipeline(chat_id: int | str, thread_id: int | None) -> bool:
+    with PIPELINE_LOCK:
+        global PIPELINE_RUNNING
+        if PIPELINE_RUNNING:
+            return False
+        PIPELINE_RUNNING = True
+    thread = threading.Thread(target=run_pipeline_worker, args=(chat_id, thread_id), daemon=True)
+    thread.start()
+    return True
+
+
+def handle_command(text: str, *, user_id: int | str | None = None, chat_id: int | str | None = None, thread_id: int | None = None) -> str | None:
     parsed = parse_command(text)
     if not parsed:
         return None
     cmd, args = parsed
-    if cmd not in {"start", "help", "upcoming", "today", "slug"}:
+    if cmd not in {"start", "help", "upcoming", "today", "slug", "runcheck"}:
         return None
     if cmd in {"start", "help"}:
         return usage()
+    if cmd == "runcheck":
+        if not is_admin_user(user_id):
+            return "Command ini hanya untuk admin yang di-allowlist."
+        if chat_id is None:
+            return "Tidak bisa menjalankan pipeline: chat_id tidak ditemukan."
+        if args and args.lower() == "status":
+            status = "sedang running" if pipeline_is_running() else "idle"
+            return f"NFT Mint Check pipeline: {status}."
+        if not start_pipeline(chat_id, thread_id):
+            return "NFT Mint Check pipeline masih running. Tunggu selesai dulu."
+        return "🚀 NFT Mint Check full pipeline dimulai. Aku kabarin kalau selesai/gagal."
 
     data = load_json(UPCOMING_FILE, {})
     if not isinstance(data, dict) or not data:
@@ -493,6 +589,8 @@ def run() -> None:
                 msg = update.get("message") or {}
                 text = msg.get("text") or ""
                 chat = msg.get("chat") or {}
+                sender = msg.get("from") or {}
+                user_id = sender.get("id")
                 chat_id = chat.get("id")
                 thread_id = msg.get("message_thread_id")
                 if chat_id is None or not allowed_chat(chat_id):
@@ -500,10 +598,10 @@ def run() -> None:
                 if parse_command(text) and not allowed_thread(thread_id):
                     log(f"ignored command outside allowed thread: {text.split()[0]} chat={chat_id} thread={thread_id}")
                     continue
-                response = handle_command(text)
+                response = handle_command(text, user_id=user_id, chat_id=chat_id, thread_id=thread_id)
                 if response:
                     send_message(chat_id, response, thread_id=thread_id)
-                    log(f"handled {text.split()[0]} chat={chat_id} thread={thread_id}")
+                    log(f"handled {text.split()[0]} chat={chat_id} thread={thread_id} user={user_id}")
         except urllib.error.HTTPError as exc:
             log(f"telegram HTTP error: {exc.code} {exc.read()[:300]!r}")
             time.sleep(5)
