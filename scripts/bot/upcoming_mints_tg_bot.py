@@ -200,6 +200,8 @@ def find_slug_matches(data: dict[str, Any], query: str, limit: int = 8) -> list[
     for slug, entry in data.items():
         if not isinstance(entry, dict):
             continue
+        if not is_active_entry(entry):
+            continue
         text = entry_search_text(slug, entry)
         norm_fields = [normalize(slug), normalize(entry.get("slug", "")), normalize(entry.get("name", "")), normalize(entry.get("link", ""))]
         score = 0.0
@@ -348,6 +350,8 @@ def filter_by_wallet(data: dict[str, Any], wallet_query: str, today_only: bool =
     results = []
     for slug, entry in sorted(data.items(), key=lambda item: extract_earliest_time(item[1]) if isinstance(item[1], dict) else datetime.max.replace(tzinfo=LOCAL_TZ)):
         if not isinstance(entry, dict):
+            continue
+        if not is_active_entry(entry):
             continue
         wallets_map = entry.get("wallets", {}) if isinstance(entry.get("wallets"), dict) else {}
         if not any(w in wallets_map for w in wallets):
@@ -781,8 +785,59 @@ def start_scraper(chat_id: int | str, thread_id: int | None) -> bool:
 
 # ============ /links & /check handlers ============
 
+def is_expired_custom_site(entry: dict[str, Any]) -> bool:
+    """Custom-site checker links are only useful briefly after discovery."""
+    if entry.get("source") != "custom_site":
+        return False
+    last_seen = entry.get("last_seen")
+    if not last_seen:
+        return False
+    try:
+        last_seen_dt = datetime.fromisoformat(str(last_seen))
+        if last_seen_dt.tzinfo is None:
+            last_seen_dt = last_seen_dt.replace(tzinfo=timezone.utc)
+        return last_seen_dt + timedelta(days=1) < datetime.now(timezone.utc)
+    except Exception:
+        return False
+
+
+def has_any_wallet_data(entry: dict[str, Any]) -> bool:
+    wallets = entry.get("wallets", {}) if isinstance(entry.get("wallets"), dict) else {}
+    return any(bool(value) for value in wallets.values())
+
+
+def has_scheduled_stage(entry: dict[str, Any]) -> bool:
+    wallets = entry.get("wallets", {}) if isinstance(entry.get("wallets"), dict) else {}
+    for stages in wallets.values():
+        values = stages if isinstance(stages, list) else [stages]
+        if any(parse_stage_time(str(stage)) for stage in values):
+            return True
+    return False
+
+
+def is_stale_unscheduled_opensea(entry: dict[str, Any]) -> bool:
+    if entry.get("source", "opensea") != "opensea":
+        return False
+    if has_scheduled_stage(entry):
+        return False
+    fallback_seen = entry.get("last_seen") or entry.get("last_check")
+    if fallback_seen:
+        try:
+            seen_dt = datetime.fromisoformat(str(fallback_seen))
+            if seen_dt.tzinfo is None:
+                seen_dt = seen_dt.replace(tzinfo=timezone.utc)
+            return seen_dt + timedelta(days=1) < datetime.now(timezone.utc)
+        except Exception:
+            return False
+    return not has_any_wallet_data(entry)
+
+
+def is_active_entry(entry: dict[str, Any]) -> bool:
+    return not is_expired_custom_site(entry) and not is_stale_unscheduled_opensea(entry)
+
+
 def handle_links() -> str:
-    """Display all checker links from upcoming_mints.json (one source).
+    """Display active checker links from upcoming_mints.json (one source).
 
     Format: numbered list, blank line every 5 entries.
     """
@@ -796,6 +851,8 @@ def handle_links() -> str:
 
     for entry in upcoming.values():
         if not isinstance(entry, dict):
+            continue
+        if not is_active_entry(entry):
             continue
         name = (entry.get("name") or "").strip()
         url = (entry.get("link") or "").strip()

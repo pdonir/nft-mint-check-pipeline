@@ -17,7 +17,7 @@ CONFIG_DIR = WORKLOAD_ROOT / "config"
 STATE_DIR = WORKLOAD_ROOT / "state"
 COOKIES_FILE = os.environ.get("TWITTER_COOKIES_FILE", "/path/to/twitter_cookies.json")
 HOURS_WINDOW = 13
-FALLBACK_TTL = timedelta(days=3)
+FALLBACK_TTL = timedelta(days=1)
 OPENSEA_PUBLIC_GRACE = timedelta(hours=1)
 GQL_URL = "https://gql.opensea.io/graphql"
 GQL_QUERY = """
@@ -526,8 +526,8 @@ async def main():
         'scrape_time': now.isoformat(),
         'cutoff_time': cutoff_time.isoformat(),
         'cache_policy': {
-            'opensea': 'expires at public_start_time + 1h; fallback last_seen + 3d when public start unavailable',
-            'non_opensea': 'expires at last_seen + 3d',
+            'opensea': 'expires at public_start_time + 1h; fallback last_seen + 1d when public start unavailable',
+            'non_opensea': 'expires at last_seen + 1d',
         },
         'all_links': merged_links,
         'removed_links': removed_links,

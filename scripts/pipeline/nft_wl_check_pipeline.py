@@ -422,7 +422,7 @@ def cleanup_expired_upcoming(data):
                     if last_seen_dt.tzinfo is None:
                         last_seen_dt = last_seen_dt.replace(tzinfo=timezone.utc)
                     last_seen_dt = last_seen_dt.astimezone(LOCAL_TZ)
-                    if last_seen_dt + timedelta(days=3) < now:
+                    if last_seen_dt + timedelta(days=1) < now:
                         removed.append(key)
                         continue
                 except Exception:
@@ -449,6 +449,23 @@ def cleanup_expired_upcoming(data):
                     if dt and (latest_dt is None or dt > latest_dt):
                         latest_dt = dt
         if latest_dt is None:
+            # OpenSea entries with no tier time usually mean the mint page is gone,
+            # ended, or metadata was unavailable. Fall back to discovery/check time.
+            fallback_seen = entry.get("last_seen") or entry.get("last_check")
+            if fallback_seen:
+                try:
+                    fallback_dt = datetime.fromisoformat(str(fallback_seen))
+                    if fallback_dt.tzinfo is None:
+                        fallback_dt = fallback_dt.replace(tzinfo=timezone.utc)
+                    fallback_dt = fallback_dt.astimezone(LOCAL_TZ)
+                    if fallback_dt + timedelta(days=1) < now:
+                        removed.append(key)
+                        continue
+                except Exception:
+                    pass
+            elif not any(entry.get("wallets", {}).values()):
+                removed.append(key)
+                continue
             cleaned[key] = entry
             continue
         if latest_dt + timedelta(hours=1) < now:
