@@ -47,7 +47,9 @@ def _load_rabby_password():
 EXTENSION_DIR = Path(os.environ.get("RABBY_EXTENSION_DIR", "/path/to/rabby_extension")).resolve()
 PROFILE_DIR = Path(os.environ.get("OPENSEA_PROFILE_DIR", "/path/to/browser_profiles/opensea"))
 RABBY_PASSWORD = _load_rabby_password()
-COLLECTION_SLUG = ""  # default empty; pass via CLI arg for one-off checks
+COLLECTION_SLUG = sys.argv[1].strip().removeprefix("https://opensea.io/collection/").split("/")[0] if len(sys.argv) > 1 else ""
+if not COLLECTION_SLUG:
+    raise SystemExit("Usage: python3 opensea_checker_browser.py <collection_slug_or_opensea_url>")
 
 
 async def dump(page, label):
@@ -85,13 +87,17 @@ async def handle_rabby_popup(popup, password=None):
             await pw.fill(password)
             await popup.wait_for_timeout(500)
             await popup.locator('button:has-text("Unlock")').first.click()
-            print("[+] Rabby unlocked")
             await popup.wait_for_timeout(3500)
             try:
                 url = popup.url
                 text = await popup.evaluate("() => document.body.innerText")
+                if "Cannot unlock without a previous vault" in text:
+                    print("[!] Rabby has no previous vault in this browser profile")
+                    return False
+                print("[+] Rabby unlocked")
                 print(f"[Rabby after unlock] {url}")
             except Exception:
+                print("[+] Rabby unlocked")
                 return True
 
         for label in ["Sign", "Confirm", "Connect", "Allow", "Approve"]:

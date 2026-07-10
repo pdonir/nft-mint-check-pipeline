@@ -214,6 +214,15 @@ async def explicit_rabby_unlock(context, password):
             unlock_btn = unlock_page.locator('button:has-text("Unlock")').first
             await unlock_btn.click()
             await unlock_page.wait_for_timeout(3000)
+            after_text = await unlock_page.evaluate("() => document.body.innerText")
+            if "Cannot unlock without a previous vault" in after_text:
+                print("    [!] Rabby has no previous vault in this browser profile")
+                await unlock_page.close()
+                return False
+            if "Unlock" in after_text and "Password" in after_text:
+                print("    [!] Rabby still locked after unlock attempt")
+                await unlock_page.close()
+                return False
             print("    [+] Rabby unlocked")
         except Exception as e:
             print(f"    [!] Rabby unlock failed: {e}")
@@ -570,6 +579,7 @@ def parse_eligibility(page_text, slug):
     return {"project": project_name, "chain": chain, "stages": stages}
 
 
+
 def format_stage_line(stage):
     """Format single stage line: ✅/❌ Tier (price, limit) — date GMT+7.
 
@@ -590,7 +600,7 @@ def format_stage_line(stage):
 
 
 # ============ Main batch ============
-async def check_one(page, slug, context=None, password=None):
+async def check_one(page, slug, context=None, password=None, wallet_name=None):
     """Check eligibility for one slug. Self-healing: if session expired
     or eligibility labels never load, auto re-login and retry once."""
 
@@ -599,9 +609,11 @@ async def check_one(page, slug, context=None, password=None):
                         wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(8000)
 
-        # Detect session expired BEFORE polling — saves time
+        # Detect session expired BEFORE polling. OpenSea can still show public
+        # eligibility labels while disconnected, so do not trust labels when the
+        # Connect Wallet button is visible.
         if context and password and await is_connect_wallet_visible(page):
-            await ensure_session_active(page, context, password)
+            await robust_login(page, context, password, wallet_name or "check_one", max_retries=1)
             await page.goto(f"https://opensea.io/collection/{slug}/overview",
                             wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(10000)
@@ -655,18 +667,27 @@ async def check_one(page, slug, context=None, password=None):
                 break
             await page.wait_for_timeout(3000)
 
-        return text, True  # Always return True — parse whatever is available
+        still_disconnected = context and password and await is_connect_wallet_visible(page)
+        labels_loaded = (
+            "MINT SCHEDULE" in text
+            and ("ELIGIBLE" in text or "NOT ELIGIBLE" in text)
+            and not still_disconnected
+        )
+        return text, labels_loaded
 
     text, labels_loaded = await navigate_and_poll()
 
     # Retry path: if labels never loaded, session likely silently broken.
     # Force re-login with robust method and retry once.
     if not labels_loaded and context and password:
-        print(f"    [!] {slug}: eligibility labels missing, forcing re-login...")
-        await robust_login(page, context, password, "retry", max_retries=1)
+        print(f"    [!] {slug}: authenticated eligibility missing, forcing re-login...")
+        await robust_login(page, context, password, wallet_name or "retry", max_retries=1)
         text, labels_loaded = await navigate_and_poll()
 
-    return parse_eligibility(text, slug)
+    parsed = parse_eligibility(text, slug)
+    if not labels_loaded:
+        parsed["error"] = "authenticated eligibility not loaded"
+    return parsed
 
 
 async def check_wallet(wallet_name, slugs):
@@ -726,11 +747,10 @@ async def check_wallet(wallet_name, slugs):
         print(f"[*] {wallet_name}: Connect_Wallet={has_connect}, ELIGIBLE={has_elig}")
 
         if has_connect and not has_elig:
-            # Session expired — need fresh SIWE sign
-            print(f"[*] {wallet_name}: session expired, performing SIWE login...")
+            # Session expired — need fresh full-browser Rabby connect/SIWE sign.
+            print(f"[*] {wallet_name}: session expired, performing browser SIWE login...")
             login_ok = await robust_login(page, context, RABBY_PASSWORD, wallet_name, max_retries=2)
             if login_ok:
-                # Reload collection page with fresh session
                 await page.goto(f"https://opensea.io/collection/{slugs[0]}/overview",
                                 wait_until="domcontentloaded", timeout=60000)
                 await page.wait_for_timeout(10000)
@@ -749,7 +769,7 @@ async def check_wallet(wallet_name, slugs):
         for i, slug in enumerate(slugs):
             print(f"  [{i+1}/{len(slugs)}] {slug}")
             try:
-                results[slug] = await check_one(page, slug, context, RABBY_PASSWORD)
+                results[slug] = await check_one(page, slug, context, RABBY_PASSWORD, wallet_name)
             except Exception as e:
                 results[slug] = {"error": str(e)}
 
@@ -780,6 +800,9 @@ def render_report(all_results, slugs, wallet_names):
             label = WALLET_LABELS.get(w, w)
             data = all_results.get(w, {}).get(slug, {})
             lines.append(f"**{label}:**")
+            if data.get("error"):
+                lines.append(f"  (no data: {data['error']})")
+                continue
             stages = data.get("stages", [])
             if not stages:
                 err = data.get("error", "no stages parsed")
@@ -816,9 +839,15 @@ if __name__ == "__main__":
         print("Wallets:", list(WALLET_LABELS.keys()))
         sys.exit(1)
 
+    def normalize_slug(value):
+        value = value.strip()
+        if "opensea.io/collection/" in value:
+            value = value.split("opensea.io/collection/", 1)[1]
+        return value.split("/", 1)[0]
+
     wallet_names = [w.strip().lower() for w in sys.argv[1].split(",") if w.strip()]
-    slugs = [s.strip() for s in sys.argv[2].split(",") if s.strip()]
+    slugs = [normalize_slug(s) for s in sys.argv[2].split(",") if s.strip()]
     if len(sys.argv) > 3:
         # Backward compat: positional slugs
-        slugs = sys.argv[2:]
+        slugs = [normalize_slug(s) for s in sys.argv[2:]]
     asyncio.run(main(wallet_names, slugs))
