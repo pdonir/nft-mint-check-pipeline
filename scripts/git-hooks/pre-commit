@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Git pre-commit hook for nft-trade/.
+# Copy this file to .git/hooks/pre-commit (after git init) and make it executable.
+#
+# Quick install (run after `git init`):
+#   cp scripts/git-hooks/pre-commit .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+#
+# Or set core.hooksPath to use this folder directly:
+#   git config core.hooksPath scripts/git-hooks
+#
+# What it does:
+#   - Runs secret scanner on staged files only (fast)
+#   - Blocks commit if any critical secret detected
+#   - Override with: git commit --no-verify (only for false positives)
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SCAN_SCRIPT="$REPO_ROOT/scripts/secret_scan.py"
+
+if [ ! -f "$SCAN_SCRIPT" ]; then
+    echo "⚠️  secret_scan.py not found at $SCAN_SCRIPT — skipping scan"
+    exit 0
+fi
+
+echo "🔒 Running secret scan on staged files..."
+
+if ! python3 "$SCAN_SCRIPT" --staged; then
+    echo ""
+    echo "❌ Pre-commit secret scan failed."
+    echo "   • If the detection is a FALSE POSITIVE: edit scripts/secret_scan.py allowlist"
+    echo "   • To bypass (DANGEROUS, only if you're sure): git commit --no-verify"
+    exit 1
+fi
+
+exit 0
