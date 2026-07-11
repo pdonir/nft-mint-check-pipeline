@@ -1,4 +1,4 @@
-# Secret scanner for nft-trade/
+# Secret scanner
 
 Automated detection of accidentally-committed secrets. Use as a pre-commit
 hook or run standalone.
@@ -46,7 +46,7 @@ python3 scripts/secret_scan.py path/to/file.py
 
 ## Install as git hook
 
-After `git init` in `/home/Donir/NFT/nft-trade/`:
+After `git init` in your workload root:
 
 ```bash
 # Option A: direct copy

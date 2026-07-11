@@ -161,11 +161,10 @@ export TZ="Asia/Jakarta"
 ```
 
 > **Shared secrets:** `ALCHEMY_API_KEY` is loaded automatically from
-> `$SHARED_ENV_FILE` (default: `~/nft-shared/secrets/alchemy.env`, mode 600,
-> single source of truth across this deployment's NFT workloads). Do NOT
-> define it in `config/upcoming_mints_notifier.env` — shared takes
-> precedence. Override the path by exporting `SHARED_ENV_FILE` before
-> running.
+> `$SHARED_ENV_FILE` (default: `${WORKLOAD_ROOT}/../shared/secrets.env`, mode 600,
+> single source of truth across this deployment). Do NOT define it in
+> `config/upcoming_mints_notifier.env` — shared takes precedence. Override
+> the path by exporting `SHARED_ENV_FILE` before running.
 
 ### 5. (Optional) Set up the Rabby password
 

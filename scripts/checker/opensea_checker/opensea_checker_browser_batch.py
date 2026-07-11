@@ -67,7 +67,7 @@ RABBY_PASSWORD = _load_rabby_password()
 # Wallet name → display label (matches user's preferred output format)
 # Loaded from `config/wallets.json` next to the workload root. Searched from
 # this script's dir upward so the checker works whether run in-place or
-# copied under a different tree (nft-trade, etc.).
+# copied under a different tree (any sibling workload).
 def _load_wallet_labels():
     """Load wallet display labels from the nearest config/wallets.json."""
     script_dir = Path(__file__).resolve().parent

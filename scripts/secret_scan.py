@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Secret scanner for nft-trade/ — pre-commit + standalone use.
+Secret scanner — pre-commit + standalone use.
 
 Detects accidentally-committed secrets:
   - Ethereum private keys (0x + 64 hex chars)
@@ -230,7 +230,7 @@ def get_scan_targets(repo_root: Path, mode: str) -> list:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Secret scanner for nft-trade/ (pre-commit + standalone)",
+        description="Secret scanner (pre-commit + standalone)",
     )
     parser.add_argument("--staged", action="store_true",
                         help="Scan only git-staged files (for pre-commit use)")

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Git pre-commit hook for nft-trade/.
+# Git pre-commit hook.
 # Copy this file to .git/hooks/pre-commit (after git init) and make it executable.
 #
 # Quick install (run after `git init`):

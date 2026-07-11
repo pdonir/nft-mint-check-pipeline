@@ -13,7 +13,7 @@ cd "$WORKLOAD_ROOT"
 
 export TZ='Asia/Jakarta'
 ENV_FILE="$WORKLOAD_ROOT/config/upcoming_mints_notifier.env"
-SHARED_ENV_FILE="${SHARED_ENV_FILE:-$HOME/nft-shared/secrets/alchemy.env}"
+SHARED_ENV_FILE="${SHARED_ENV_FILE:-${WORKLOAD_ROOT}/../shared/secrets.env}"
 # Load shared secrets first (single source of truth for ALCHEMY_API_KEY),
 # then workload env (workload values can override shared defaults).
 for _env_file in "$SHARED_ENV_FILE" "$ENV_FILE"; do
