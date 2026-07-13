@@ -490,9 +490,18 @@ async def main():
         page = await context.new_page()
 
         for list_url in list_urls:
-            links = await scrape_list(page, list_url, cutoff_time)
-            all_links.extend(links)
-            print(f"    found {len(links)} mint/checker links")
+            try:
+                links = await asyncio.wait_for(
+                    scrape_list(page, list_url, cutoff_time), timeout=120
+                )
+                all_links.extend(links)
+                print(f"    found {len(links)} mint/checker links")
+            except asyncio.TimeoutError:
+                print(f"    [!] list timed out after 120s, skipping: {list_url}")
+                continue
+            except Exception as e:
+                print(f"    [!] list error, skipping: {list_url} ({e})")
+                continue
 
         await browser.close()
 

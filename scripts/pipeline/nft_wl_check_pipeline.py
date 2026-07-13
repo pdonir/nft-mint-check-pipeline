@@ -11,7 +11,7 @@ Steps:
 Run via: python3 cron_pipeline.py
 Requires: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID env vars
 """
-import json, os, re, subprocess, sys, urllib.request
+import json, os, re, signal, subprocess, sys, urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -650,23 +650,42 @@ def main():
 
     # ── Step 1: Scrape X Lists ──
     log("\n[Step 1/5] Scraping X Lists...")
+    scraper_proc = None
     try:
-        scraper_result = subprocess.run(
+        # start_new_session=True puts the scraper in its own process group so that,
+        # on timeout, we can kill the WHOLE tree (python + chromium/node children).
+        # Killing only the python parent leaves chromium holding the stdout pipe,
+        # which makes communicate() hang forever and swallows the timeout message.
+        scraper_proc = subprocess.Popen(
             ["python3", SCRAPER_SCRIPT],
-            capture_output=True, text=True, timeout=240
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
         )
-        out = scraper_result.stdout[-800:] if scraper_result.stdout else ""
-        err = scraper_result.stderr[-300:] if scraper_result.stderr else ""
-        if scraper_result.returncode == 0:
-            log("[+] Scraper completed")
+        try:
+            stdout, stderr = scraper_proc.communicate(timeout=420)
+        except subprocess.TimeoutExpired:
+            log("[!] Scraper timed out after 420s, killing process group")
+            try:
+                os.killpg(os.getpgid(scraper_proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = scraper_proc.communicate()
+            stdout, stderr = stdout or "", stderr or ""
         else:
-            log(f"[!] Scraper exited with code {scraper_result.returncode}")
-            if err:
-                log(f"[!] Scraper stderr: {err}")
-    except subprocess.TimeoutExpired:
-        log("[!] Scraper timed out after 240s")
+            err = stderr[-300:] if stderr else ""
+            if scraper_proc.returncode == 0:
+                log("[+] Scraper completed")
+            else:
+                log(f"[!] Scraper exited with code {scraper_proc.returncode}")
+                if err:
+                    log(f"[!] Scraper stderr: {err}")
     except Exception as e:
         log(f"[!] Scraper error: {e}")
+        if scraper_proc and scraper_proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(scraper_proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
 
     # ── Load scraped links ──
     scraped_file = STATE_DIR / "scraped_links.json"
