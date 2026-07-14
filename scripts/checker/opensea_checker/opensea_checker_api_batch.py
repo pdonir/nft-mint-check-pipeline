@@ -44,6 +44,73 @@ def _load_wallet_display_map() -> Dict[str, str]:
 
 _DISPLAY_MAP = _load_wallet_display_map()
 
+# --- chain detection via OpenSea REST v2 (GraphQL dropBySlug tidak bawa chain) ---
+import requests
+
+_OPENSEA_KEY_FILE = Path("/home/Donir/NFT/shared/secrets/opensea_api_key")
+_CHAIN_CACHE: Dict[str, str] = {}
+# OpenSea chain identifier (lowercase) -> label display buat notif
+_CHAIN_LABELS = {
+    "ethereum": "Ethereum",
+    "matic": "Polygon",
+    "polygon": "Polygon",
+    "base": "Base",
+    "arbitrum": "Arbitrum",
+    "arbitrum_nova": "Arbitrum Nova",
+    "optimism": "Optimism",
+    "zora": "Zora",
+    "blast": "Blast",
+    "avalanche": "Avalanche",
+    "klaytn": "Klaytn",
+    "bsc": "BNB Chain",
+    "sei": "Sei",
+    "robinhood": "Robinhood Chain",
+    "abstract": "Abstract",
+    "ronin": "Ronin",
+    "shape": "Shape",
+    "soneium": "Soneium",
+    "unichain": "Unichain",
+    "b3": "B3",
+    "apechain": "ApeChain",
+    "berachain": "Berachain",
+    "flow": "Flow",
+    "ink": "Ink",
+}
+
+
+def _chain_label(identifier: str) -> str:
+    ident = (identifier or "").strip().lower()
+    return _CHAIN_LABELS.get(ident, identifier.replace("_", " ").title() if identifier else "Ethereum")
+
+
+def fetch_chain(slug: str) -> str:
+    """Resolve chain label untuk slug via OpenSea REST v2 collections.
+
+    Chain ada di contracts[0].chain (top-level 'chain' selalu None). Cache per
+    slug biar gak fetch ulang per wallet. Fallback 'Ethereum' kalau gagal.
+    """
+    if slug in _CHAIN_CACHE:
+        return _CHAIN_CACHE[slug]
+    label = "Ethereum"
+    try:
+        api_key = _OPENSEA_KEY_FILE.read_text().strip() if _OPENSEA_KEY_FILE.exists() else ""
+        resp = requests.get(
+            f"https://api.opensea.io/api/v2/collections/{slug}",
+            headers={
+                "X-API-KEY": api_key,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            timeout=15,
+        )
+        contracts = (resp.json() or {}).get("contracts") or []
+        if contracts and contracts[0].get("chain"):
+            label = _chain_label(contracts[0]["chain"])
+    except Exception:
+        pass
+    _CHAIN_CACHE[slug] = label
+    return label
+
 
 def log_error(message: str) -> None:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -77,7 +144,7 @@ def check_wallet(wallet_key: str, slugs: List[str]) -> Dict[str, dict]:
             stages = drop.get("stages") or []
             results[slug] = {
                 "project": project_name_from_slug(slug),
-                "chain": "Ethereum",
+                "chain": fetch_chain(slug),
                 "stages": stages,
             }
             auth_warning = (data.get("extensions") or {}).get("auth")
