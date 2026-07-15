@@ -48,7 +48,8 @@ _DISPLAY_MAP = _load_wallet_display_map()
 import requests
 
 _OPENSEA_KEY_FILE = Path("/home/Donir/NFT/shared/secrets/opensea_api_key")
-_CHAIN_CACHE: Dict[str, str] = {}
+# slug -> {"label": str, "address": str} (address bisa "" kalau gak ketemu)
+_CHAIN_CACHE: Dict[str, dict] = {}
 # OpenSea chain identifier (lowercase) -> label display buat notif
 _CHAIN_LABELS = {
     "ethereum": "Ethereum",
@@ -78,20 +79,63 @@ _CHAIN_LABELS = {
 }
 
 
+# OpenSea chain identifier (lowercase) -> explorer base URL utk contract address.
+# Link jadi: <base>/address/<contract>. Chain yg gak ada di sini -> plain label (no link).
+_EXPLORER_BASE = {
+    "ethereum": "https://etherscan.io",
+    "matic": "https://polygonscan.com",
+    "polygon": "https://polygonscan.com",
+    "base": "https://basescan.org",
+    "arbitrum": "https://arbiscan.io",
+    "arbitrum_nova": "https://nova.arbiscan.io",
+    "optimism": "https://optimistic.etherscan.io",
+    "zora": "https://explorer.zora.energy",
+    "blast": "https://blastscan.io",
+    "avalanche": "https://snowtrace.io",
+    "bsc": "https://bscscan.com",
+    "sei": "https://seitrace.com",
+    "robinhood": "https://robinscan.io",
+    "abstract": "https://abscan.org",
+    "ronin": "https://app.roninchain.com",
+    "shape": "https://shapescan.xyz",
+    "soneium": "https://soneium.blockscout.com",
+    "unichain": "https://uniscan.xyz",
+    "b3": "https://explorer.b3.fun",
+    "apechain": "https://apescan.io",
+    "berachain": "https://berascan.com",
+    "ink": "https://explorer.inkonchain.com",
+}
+
+
 def _chain_label(identifier: str) -> str:
     ident = (identifier or "").strip().lower()
     return _CHAIN_LABELS.get(ident, identifier.replace("_", " ").title() if identifier else "Ethereum")
 
 
-def fetch_chain(slug: str) -> str:
-    """Resolve chain label untuk slug via OpenSea REST v2 collections.
+def _chain_markdown(identifier: str, address: str) -> str:
+    """Render chain sebagai markdown link ke explorer contract, atau plain label.
 
-    Chain ada di contracts[0].chain (top-level 'chain' selalu None). Cache per
-    slug biar gak fetch ulang per wallet. Fallback 'Ethereum' kalau gagal.
+    Kalau ada address + explorer base utk chain -> [Label](base/address/0x..).
+    Kalau salah satu gak ada -> plain 'Label' (aman, gak break format lama).
+    """
+    label = _chain_label(identifier)
+    ident = (identifier or "").strip().lower()
+    base = _EXPLORER_BASE.get(ident)
+    if base and address:
+        return f"[{label}]({base}/address/{address})"
+    return label
+
+
+def fetch_chain_info(slug: str) -> dict:
+    """Resolve chain identifier + contract address untuk slug via OpenSea REST v2.
+
+    Chain + address ada di contracts[0] (top-level 'chain' selalu None). Cache per
+    slug biar gak fetch ulang per wallet. Fallback ethereum/no-address kalau gagal.
+    Return: {"identifier": str, "label": str, "address": str}.
     """
     if slug in _CHAIN_CACHE:
         return _CHAIN_CACHE[slug]
-    label = "Ethereum"
+    info = {"identifier": "ethereum", "label": "Ethereum", "address": ""}
     try:
         api_key = _OPENSEA_KEY_FILE.read_text().strip() if _OPENSEA_KEY_FILE.exists() else ""
         resp = requests.get(
@@ -104,12 +148,26 @@ def fetch_chain(slug: str) -> str:
             timeout=15,
         )
         contracts = (resp.json() or {}).get("contracts") or []
-        if contracts and contracts[0].get("chain"):
-            label = _chain_label(contracts[0]["chain"])
+        if contracts:
+            ident = contracts[0].get("chain") or "ethereum"
+            info = {
+                "identifier": ident,
+                "label": _chain_label(ident),
+                "address": contracts[0].get("address") or "",
+            }
     except Exception:
         pass
-    _CHAIN_CACHE[slug] = label
-    return label
+    _CHAIN_CACHE[slug] = info
+    return info
+
+
+def fetch_chain(slug: str) -> str:
+    """Backward-compat: balikin chain markdown (link explorer kalau ada).
+
+    Dipakai caller lama yg cuma butuh string chain buat baris report.
+    """
+    info = fetch_chain_info(slug)
+    return _chain_markdown(info["identifier"], info["address"])
 
 
 def log_error(message: str) -> None:
