@@ -1,5 +1,12 @@
 # NFT Mint Check Pipeline
 
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.10+-blue.svg">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-green.svg">
+  <img alt="Stars" src="https://img.shields.io/github/stars/pdonir/nft-mint-check-pipeline?style=social">
+  <img alt="Last commit" src="https://img.shields.io/github/last-commit/pdonir/nft-mint-check-pipeline">
+</p>
+
 Automated NFT mint tracking pipeline — scrapes Twitter/X Lists for newly announced
 mint links and checker sites, checks eligibility across all configured wallets, and
 sends scheduled Telegram reports.
@@ -15,6 +22,26 @@ A Telegram bot is included so you can re-check any project on demand from your
 phone (`/check`, `/links`), query the current state (`/upcoming`, `/today`,
 `/slug`), or trigger the full pipeline (`/runcheck`) without SSH'ing into the
 server.
+
+---
+
+## Quick Start
+
+```bash
+git clone https://github.com/pdonir/nft-mint-check-pipeline
+cd nft-mint-check-pipeline
+pip install -r requirements.txt
+playwright install chromium
+
+# Copy & edit configs
+cp config/wallets.example.json config/wallets.json
+cp config/list_nft.example.json config/list_nft.json
+
+# Run pipeline
+python3 scripts/pipeline/nft_wl_check_pipeline.py
+```
+
+Detailed setup instructions below.
 
 ---
 
@@ -351,6 +378,31 @@ Each step logs its status — look for `[*]`, `[+]`, `[!]` prefixes:
 
 ---
 
+## Contributing
+
+Contributions are welcome! Here's how:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feat/your-feature`)
+3. Commit your changes (`git commit -m 'feat: add something cool'`)
+4. Push to your fork (`git push origin feat/your-feature`)
+5. Open a Pull Request
+
+Please keep PRs focused — one feature per PR. Bug fixes and documentation
+improvements are always appreciated.
+
+---
+
+## Disclaimer
+
+This project is provided as-is, for educational and personal automation purposes.
+NFT minting involves real blockchain transactions with real funds. Always verify
+prices, gas fees, and contract addresses before minting. The authors are not
+responsible for any financial losses, failed transactions, or smart contract
+issues.
+
+---
+
 ## Requirements
 
 - Python 3.10+
@@ -360,3 +412,9 @@ Each step logs its status — look for `[*]`, `[+]`, `[!]` prefixes:
 - Twitter/X account with cookies
 - Telegram bot token + chat ID
 - (Optional) Rabby extension + password for browser-based OpenSea fallback
+
+---
+
+## License
+
+Distributed under the MIT License. See `LICENSE` for more information.
