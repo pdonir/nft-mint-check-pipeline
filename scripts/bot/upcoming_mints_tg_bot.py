@@ -294,15 +294,36 @@ def format_entry(
 ) -> str:
     name = entry.get("name") or slug
     link = entry.get("link") or ""
-    chain = entry.get("chain") or "Ethereum"
-    source = entry.get("source") or "-"
-    handle = entry.get("tweet_author_handle") or "-"
+    chain = (entry.get("chain") or "Ethereum").strip() or "Ethereum"
     wallet_display = load_wallet_display()
 
-    title = f"*{markdown_escape(name)}* — {markdown_escape(chain)}"
     if link:
-        title = f"[{markdown_escape(name)}]({link}) — {markdown_escape(chain)}"
-    lines = [title, f"Slug: `{markdown_escape(slug)}` | Source: `{markdown_escape(source)}` | X: `{markdown_escape(handle)}`"]
+        name_part = f"[{markdown_escape(name)}]({link})"
+    else:
+        name_part = f"*{markdown_escape(name)}*"
+    parts = [name_part, chain]
+
+    handle = (entry.get("tweet_author_handle") or "").strip().lstrip("@")
+    if handle:
+        parts.append(f"[{markdown_escape(handle)}](https://x.com/{handle})")
+        # Rick deep-link symbol is U+267A ♺
+        parts.append("[♺](https://t.me/rick?start=twit-%s)" % handle)
+
+    website = (entry.get("website_url") or entry.get("website") or "").strip()
+    if website:
+        parts.append(f"[Website]({website})")
+
+    max_supply = entry.get("max_supply")
+    if max_supply in (None, "", "-", "TBA", "tba", "unknown"):
+        supply_token = "📊 TBA"
+    else:
+        try:
+            supply_token = f"📊 {int(str(max_supply).replace(',', '').strip()):,}"
+        except (TypeError, ValueError):
+            supply_token = f"📊 {max_supply}"
+    parts.append(supply_token)
+
+    lines = [" • ".join(parts)]
 
     wallets = entry.get("wallets", {}) if isinstance(entry.get("wallets"), dict) else {}
     selected = wallet_filter or list(wallets.keys())

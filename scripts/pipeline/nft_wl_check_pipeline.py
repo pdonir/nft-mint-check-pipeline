@@ -158,6 +158,177 @@ def convert_utc_to_local_in_line(line):
             return line[:m.start()] + f"{prefix}: {formatted}"
     return line
 
+
+# ── report meta helpers (twitter / website / supply) ───────
+
+# Prefer env override; default to sibling shared secrets relative to this workload.
+# Local deploy: ${WORKLOAD_ROOT}/../shared/secrets/opensea_api_key
+OPENSEA_KEY_FILE = Path(
+    os.environ.get(
+        "OPENSEA_API_KEY_FILE",
+        str(WORKLOAD_ROOT.parent / "shared" / "secrets" / "opensea_api_key"),
+    )
+)
+_OPENSEA_META_CACHE = {}
+
+
+def markdown_escape_label(text):
+    """Escape dynamic labels for Telegram Markdown v1."""
+    return (
+        str(text)
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace("`", "'")
+        .replace("_", " ")
+    )
+
+
+def slug_from_entry(key, entry):
+    link = (entry or {}).get("link") or ""
+    if "/collection/" in link:
+        return link.split("/collection/")[-1].split("/")[0].split("?")[0].strip()
+    return (key or "").strip()
+
+
+def is_opensea_entry(key, entry):
+    if (entry or {}).get("source") == "opensea":
+        return True
+    link = (entry or {}).get("link") or ""
+    return "opensea.io/collection/" in link
+
+
+def _opensea_headers():
+    api_key = ""
+    try:
+        if OPENSEA_KEY_FILE.exists():
+            api_key = OPENSEA_KEY_FILE.read_text().strip()
+    except Exception:
+        api_key = ""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "application/json",
+    }
+    if api_key:
+        headers["X-API-KEY"] = api_key
+    return headers
+
+
+def _http_json(url, timeout=15):
+    try:
+        import requests
+        resp = requests.get(url, headers=_opensea_headers(), timeout=timeout)
+        if not resp.ok:
+            return None
+        return resp.json()
+    except Exception:
+        try:
+            req = urllib.request.Request(url, headers=_opensea_headers())
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except Exception:
+            return None
+
+
+def fetch_opensea_meta(slug):
+    """Fetch twitter / website / max_supply for an OpenSea collection slug.
+
+    - twitter + website: GET /api/v2/collections/{slug}
+    - max_supply: GET /api/v2/drops/{slug} (mint cap); TBA if drop missing
+    """
+    slug = (slug or "").strip()
+    if not slug:
+        return {"tweet_author_handle": "", "website_url": "", "max_supply": None}
+    if slug in _OPENSEA_META_CACHE:
+        return dict(_OPENSEA_META_CACHE[slug])
+
+    meta = {"tweet_author_handle": "", "website_url": "", "max_supply": None}
+    col = _http_json(f"https://api.opensea.io/api/v2/collections/{slug}") or {}
+    if isinstance(col, dict):
+        tw = (col.get("twitter_username") or "").strip().lstrip("@")
+        if tw:
+            meta["tweet_author_handle"] = tw
+        website = (col.get("project_url") or col.get("external_url") or "").strip()
+        if website:
+            meta["website_url"] = website.rstrip("/")
+
+    drop = _http_json(f"https://api.opensea.io/api/v2/drops/{slug}") or {}
+    if isinstance(drop, dict) and drop.get("max_supply") not in (None, ""):
+        try:
+            meta["max_supply"] = int(str(drop.get("max_supply")).replace(",", "").strip())
+        except (TypeError, ValueError):
+            meta["max_supply"] = str(drop.get("max_supply")).strip()
+
+    _OPENSEA_META_CACHE[slug] = dict(meta)
+    return meta
+
+
+def apply_opensea_meta(entry, slug=None, prefer_existing_handle=True):
+    """Mutate entry with OpenSea twitter/website/max_supply. Safe no-op on failure."""
+    if not isinstance(entry, dict):
+        return entry
+    key_slug = slug or slug_from_entry(entry.get("slug") or "", entry)
+    if not key_slug or not is_opensea_entry(key_slug, entry):
+        return entry
+    meta = fetch_opensea_meta(key_slug)
+    existing_handle = (entry.get("tweet_author_handle") or "").strip().lstrip("@")
+    api_handle = (meta.get("tweet_author_handle") or "").strip().lstrip("@")
+    if api_handle:
+        # Prefer official OpenSea twitter over scraped tweet author when available.
+        entry["tweet_author_handle"] = api_handle
+    elif existing_handle and prefer_existing_handle:
+        entry["tweet_author_handle"] = existing_handle
+    if meta.get("website_url"):
+        entry["website_url"] = meta["website_url"]
+    if meta.get("max_supply") not in (None, ""):
+        entry["max_supply"] = meta["max_supply"]
+    elif "max_supply" not in entry:
+        entry["max_supply"] = None
+    return entry
+
+
+def format_supply_token(value):
+    """Always return a supply token. Never omit the field."""
+    if value in (None, "", "-", "TBA", "tba", "unknown"):
+        return "📊 TBA"
+    try:
+        n = int(str(value).replace(",", "").strip())
+        return f"📊 {n:,}"
+    except (TypeError, ValueError):
+        return f"📊 {value}"
+
+
+def build_project_header_line(idx, entry, slug=None):
+    """One-line project header with • separators.
+
+    Example:
+    1. [Hoodlust](opensea) • [Robinhood Chain](explorer) • [KHFRHN](x) • [♺](rick) • [Website](url) • 📊 1,000
+    """
+    name = (entry or {}).get("name") or slug or "Unknown"
+    link = ((entry or {}).get("link") or "").strip()
+    chain = ((entry or {}).get("chain") or "Ethereum").strip() or "Ethereum"
+    if link:
+        name_part = f"[{markdown_escape_label(name)}]({link})"
+    else:
+        name_part = markdown_escape_label(name)
+
+    parts = [name_part, chain]
+
+    handle = ((entry or {}).get("tweet_author_handle") or "").strip().lstrip("@")
+    if handle:
+        # Display escapes `_` for Telegram Markdown; URL keeps raw handle.
+        parts.append(f"[{markdown_escape_label(handle)}](https://x.com/{handle})")
+        # Rick deep-link symbol is U+267A ♺ (not hot springs U+2668).
+        parts.append("[♺](https://t.me/rick?start=twit-%s)" % handle)
+
+    website = ((entry or {}).get("website_url") or (entry or {}).get("website") or "").strip()
+    if website:
+        parts.append(f"[Website]({website})")
+
+    parts.append(format_supply_token((entry or {}).get("max_supply")))
+    return f"{idx}. " + " • ".join(parts)
+
+
 # ── eligibility check ─────────────────────────────────────
 
 def run_eligibility_check(slugs):
@@ -381,6 +552,15 @@ def merge_project_entry(existing, incoming):
             merged['tweet_author_handle'] = incoming.get('tweet_author_handle')
         elif existing.get('tweet_author_handle'):
             merged['tweet_author_handle'] = existing.get('tweet_author_handle')
+        # Preserve OpenSea-enriched social/supply meta even if source flips custom.
+        if existing.get('website_url') and not merged.get('website_url'):
+            merged['website_url'] = existing.get('website_url')
+        if existing.get('max_supply') not in (None, '') and merged.get('max_supply') in (None, ''):
+            merged['max_supply'] = existing.get('max_supply')
+        if incoming.get('website_url'):
+            merged['website_url'] = incoming.get('website_url')
+        if incoming.get('max_supply') not in (None, ''):
+            merged['max_supply'] = incoming.get('max_supply')
         # Keep existing OpenSea wallets untouched
         return merged
 
@@ -394,6 +574,14 @@ def merge_project_entry(existing, incoming):
         merged['tweet_author_handle'] = incoming.get('tweet_author_handle')
     elif existing.get('tweet_author_handle'):
         merged['tweet_author_handle'] = existing.get('tweet_author_handle')
+    if incoming.get('website_url'):
+        merged['website_url'] = incoming.get('website_url')
+    elif existing.get('website_url'):
+        merged['website_url'] = existing.get('website_url')
+    if incoming.get('max_supply') not in (None, ''):
+        merged['max_supply'] = incoming.get('max_supply')
+    elif existing.get('max_supply') not in (None, ''):
+        merged['max_supply'] = existing.get('max_supply')
 
     existing_wallets = dict(existing.get('wallets', {}))
     incoming_wallets = incoming.get('wallets', {})
@@ -507,10 +695,7 @@ def format_upcoming_report(upcoming):
     sorted_upcoming = sorted(upcoming.items(), key=lambda x: extract_earliest_time(x[1]))
     lines = ["*📋 Upcoming Mints*\n"]
     for idx, (slug, entry) in enumerate(sorted_upcoming, start=1):
-        name = entry.get("name", slug)
-        link = entry.get("link", "")
-        chain = entry.get("chain", "Ethereum")
-        lines.append(f"{idx}. [{name}]({link}) — {chain}")
+        lines.append(build_project_header_line(idx, entry, slug=slug))
         for wallet, stages in entry.get("wallets", {}).items():
             display = WALLET_DISPLAY.get(wallet, wallet)
             lines.append(f"*{display}:*")
@@ -542,6 +727,10 @@ def format_today_report(upcoming):
                 "link": entry.get("link", ""),
                 "chain": entry.get("chain", "Ethereum"),
                 "wallets": today_wallets,
+                "tweet_author_handle": entry.get("tweet_author_handle", ""),
+                "website_url": entry.get("website_url", ""),
+                "max_supply": entry.get("max_supply"),
+                "source": entry.get("source"),
             }
     if not today_entries:
         return ""
@@ -549,10 +738,7 @@ def format_today_report(upcoming):
     now = datetime.now(LOCAL_TZ)
     lines = [f"*📅 Mint Today ({now.strftime('%d %b')})*\n"]
     for idx, (slug, entry) in enumerate(sorted_today, start=1):
-        name = entry.get("name", slug)
-        link = entry.get("link", "")
-        chain = entry.get("chain", "Ethereum")
-        lines.append(f"{idx}. [{name}]({link}) — {chain}")
+        lines.append(build_project_header_line(idx, entry, slug=slug))
         for wallet, stages in entry.get("wallets", {}).items():
             display = WALLET_DISPLAY.get(wallet, wallet)
             lines.append(f"*{display}:*")
@@ -733,6 +919,7 @@ def main():
                     scraped_meta = scraped_project_links.get(slug, {})
                     handle = scraped_meta.get('tweet_author_handle', '')
                     data['tweet_author_handle'] = handle
+                    apply_opensea_meta(data, slug=slug)
                     merge_key = slug
                     existing = upcoming.get(merge_key)
                     if not existing and handle:
@@ -743,8 +930,11 @@ def main():
                     upcoming[merge_key] = merge_project_entry(existing, data)
                     if merge_key != slug and slug in upcoming:
                         del upcoming[slug]
-                    if handle:
-                        handle_to_existing_key[handle.lower().strip()] = merge_key
+                    # Re-apply after merge so website/supply survive merge edge cases.
+                    apply_opensea_meta(upcoming[merge_key], slug=slug_from_entry(merge_key, upcoming[merge_key]) or slug)
+                    final_handle = (upcoming[merge_key].get('tweet_author_handle') or handle or '').lower().strip()
+                    if final_handle:
+                        handle_to_existing_key[final_handle] = merge_key
                     log(f"  + {data['name']} ({merge_key}) [opensea]")
 
         if custom_project_keys:
@@ -788,6 +978,11 @@ def main():
 
     # ── Step 5: Send reports ──
     log("\n[Step 5/5] Sending Telegram reports...")
+    # Ensure OpenSea entries always have fresh twitter/website/supply for the report.
+    for key, entry in list(upcoming.items()):
+        if isinstance(entry, dict) and is_opensea_entry(key, entry):
+            apply_opensea_meta(entry, slug=slug_from_entry(key, entry) or key)
+    save_json(UPCOMING_FILE, upcoming)
     upcoming_report = format_upcoming_report(upcoming)
     today_report = format_today_report(upcoming)
 
