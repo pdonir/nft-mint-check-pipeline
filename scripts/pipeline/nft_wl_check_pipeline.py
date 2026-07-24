@@ -302,7 +302,7 @@ def build_project_header_line(idx, entry, slug=None):
     """One-line project header with • separators.
 
     Example:
-    1. [Hoodlust](opensea) • [Robinhood Chain](explorer) • [KHFRHN](x) • [♺](rick) • [Website](url) • 📊 1,000
+    1. [Project](opensea) • [Chain](explorer) • [Handle](x) • [♺](rick) • [Website](url) • 📊 1,000
     """
     name = (entry or {}).get("name") or slug or "Unknown"
     link = ((entry or {}).get("link") or "").strip()
