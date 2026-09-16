@@ -1046,6 +1046,18 @@ def _parse_final_report(report_text: str, wallet_keys: list[str]) -> dict[str, l
     return result
 
 
+def _parse_report_metadata(report_text: str, slug: str) -> dict[str, str]:
+    """Extract project label and chain markdown from the checker heading."""
+    pattern = re.compile(
+        r"^\s*\d+\.\s+\[([^]]+)\]\(https://opensea\.io/collection/[^)]+\)\s+—\s+(.+?)\s*$"
+    )
+    for raw_line in report_text.splitlines():
+        match = pattern.match(raw_line)
+        if match:
+            return {"name": match.group(1).strip(), "chain": match.group(2).strip()}
+    return {"name": slug.replace("-", " ").title(), "chain": "Unknown"}
+
+
 def _resolve_slug_for_check(query: str, data: dict[str, Any]) -> tuple[str | None, float]:
     """Resolve a /check query to a real slug via exact or fuzzy match.
 
@@ -1082,23 +1094,27 @@ def _direct_opensea_slug(query: str) -> str | None:
     return value if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", value) else None
 
 
-def _update_upcoming_entry(slug: str, parsed_stages: dict[str, list[str]], data: dict[str, Any]) -> None:
+def _update_upcoming_entry(slug: str, parsed_stages: dict[str, list[str]], data: dict[str, Any], metadata: dict[str, str] | None = None) -> None:
     """Update or create an entry in upcoming_mints.json with the parsed stages.
 
     Overwrites the wallets.{key} list per-wallet. Adds last_check timestamp.
     """
     if slug not in data or not isinstance(data.get(slug), dict):
         # Build a fresh entry for an unseen slug (e.g. /check on something new)
+        metadata = metadata or {}
         data[slug] = {
-            "name": slug.replace("-", " ").title(),
+            "name": metadata.get("name") or slug.replace("-", " ").title(),
             "link": f"https://opensea.io/collection/{slug}/overview",
-            "chain": "Ethereum",
+            "chain": metadata.get("chain") or "Unknown",
             "wallets": {w: [] for w in parsed_stages},
             "source": "opensea",
             "last_check": datetime.now(LOCAL_TZ).isoformat(timespec="seconds"),
         }
     else:
         entry = data[slug]
+        if metadata:
+            entry["name"] = metadata.get("name") or entry.get("name")
+            entry["chain"] = metadata.get("chain") or entry.get("chain")
         if "wallets" not in entry or not isinstance(entry["wallets"], dict):
             entry["wallets"] = {}
         for w in parsed_stages:
@@ -1142,15 +1158,16 @@ def handle_check(args: str) -> str | CommandResponse:
     else:
         wallets_to_check = list(wallet_display.keys())
 
-    # Resolve known scraped entries first; otherwise check the supplied OpenSea
-    # slug directly so /check is not limited to scraper discoveries.
+    # Explicit OpenSea URLs and raw slugs are exact identifiers and must never
+    # be replaced by a fuzzy match from previously scraped state.
     data = load_json(UPCOMING_FILE, {})
     if not isinstance(data, dict):
         data = {}
-    matched_slug, score = _resolve_slug_for_check(query, data)
     direct_slug = _direct_opensea_slug(query)
-    if not matched_slug:
+    if direct_slug:
         matched_slug, score = direct_slug, 1.0
+    else:
+        matched_slug, score = _resolve_slug_for_check(query, data)
     if not matched_slug:
         return f"Input bukan slug atau link collection OpenSea yang valid: `{markdown_escape(query)}`"
 
@@ -1173,7 +1190,8 @@ def handle_check(args: str) -> str | CommandResponse:
 
         # Parse and merge
         parsed = _parse_final_report(report, wallets_to_check)
-        _update_upcoming_entry(matched_slug, parsed, data)
+        metadata = _parse_report_metadata(report, matched_slug)
+        _update_upcoming_entry(matched_slug, parsed, data, metadata)
 
         # Reload (post-save) and render
         data = load_json(UPCOMING_FILE, {})
