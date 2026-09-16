@@ -23,6 +23,18 @@ phone (`/check`, `/links`), query the current state (`/upcoming`, `/today`,
 `/slug`), or trigger the full pipeline (`/runcheck`) without SSH'ing into the
 server.
 
+`/check` is not limited to links discovered by the X scraper. It accepts any
+OpenSea collection slug or full collection URL. Without a wallet filter it
+checks every configured wallet; add `--wallet` (or the compact em-dash form)
+to check only selected wallets:
+
+```text
+/check example-collection
+/check https://opensea.io/collection/example-collection
+/check example-collection --wallet wallet_1
+/check https://opensea.io/collection/example-collection —wallet_1
+```
+
 ---
 
 ## Quick Start

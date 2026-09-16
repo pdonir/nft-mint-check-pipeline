@@ -1058,6 +1058,30 @@ def _resolve_slug_for_check(query: str, data: dict[str, Any]) -> tuple[str | Non
     return None, 0.0
 
 
+def _direct_opensea_slug(query: str) -> str | None:
+    """Normalize an arbitrary OpenSea collection URL or raw slug.
+
+    This intentionally does not require the slug to exist in scraped state;
+    OpenSea's checker remains the authority for whether the drop exists.
+    """
+    value = str(query or "").strip().strip("<>")
+    if not value:
+        return None
+    if re.match(r"^https?://", value, re.I):
+        try:
+            parsed = urllib.parse.urlparse(value)
+            if parsed.netloc.lower().removeprefix("www.") != "opensea.io":
+                return None
+            parts = [urllib.parse.unquote(x) for x in parsed.path.split("/") if x]
+            if len(parts) < 2 or parts[0].lower() not in {"collection", "drops"}:
+                return None
+            value = parts[1]
+        except Exception:
+            return None
+    value = value.strip().strip("/")
+    return value if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", value) else None
+
+
 def _update_upcoming_entry(slug: str, parsed_stages: dict[str, list[str]], data: dict[str, Any]) -> None:
     """Update or create an entry in upcoming_mints.json with the parsed stages.
 
@@ -1095,8 +1119,8 @@ def handle_check(args: str) -> str | CommandResponse:
       /check <slug> --wallet X — single wallet
       /check <slug> —X         — em-dash shorthand for single wallet
 
-    Auto-resolves slug typos via find_slug_matches. Runs the API checker,
-    parses the FINAL REPORT, and merges the result into upcoming_mints.json.
+    Known scraped slugs retain fuzzy matching. Any valid raw slug or OpenSea
+    collection URL can also be checked directly, then saved into state.
     """
     if not args:
         return usage("check")
@@ -1118,13 +1142,17 @@ def handle_check(args: str) -> str | CommandResponse:
     else:
         wallets_to_check = list(wallet_display.keys())
 
-    # Resolve slug (fuzzy-match against upcoming_mints.json)
+    # Resolve known scraped entries first; otherwise check the supplied OpenSea
+    # slug directly so /check is not limited to scraper discoveries.
     data = load_json(UPCOMING_FILE, {})
     if not isinstance(data, dict):
         data = {}
     matched_slug, score = _resolve_slug_for_check(query, data)
+    direct_slug = _direct_opensea_slug(query)
     if not matched_slug:
-        return f"Slug/project tidak ketemu: `{markdown_escape(query)}`"
+        matched_slug, score = direct_slug, 1.0
+    if not matched_slug:
+        return f"Input bukan slug atau link collection OpenSea yang valid: `{markdown_escape(query)}`"
 
     fuzzy_note = ""
     if score < 0.9:
