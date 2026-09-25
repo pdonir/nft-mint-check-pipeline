@@ -602,6 +602,11 @@ def cleanup_expired_upcoming(data):
     now = datetime.now(LOCAL_TZ)
     cleaned = {}
     removed = []
+    removed_entries = []
+
+    def mark_removed(key, entry):
+        removed.append(key)
+        removed_entries.append((key, dict(entry)))
     for key, entry in data.items():
         source = entry.get("source", "opensea")
         if source == "custom_site":
@@ -613,7 +618,7 @@ def cleanup_expired_upcoming(data):
                         last_seen_dt = last_seen_dt.replace(tzinfo=timezone.utc)
                     last_seen_dt = last_seen_dt.astimezone(LOCAL_TZ)
                     if last_seen_dt + timedelta(days=1) < now:
-                        removed.append(key)
+                        mark_removed(key, entry)
                         continue
                 except Exception:
                     pass
@@ -649,21 +654,34 @@ def cleanup_expired_upcoming(data):
                         fallback_dt = fallback_dt.replace(tzinfo=timezone.utc)
                     fallback_dt = fallback_dt.astimezone(LOCAL_TZ)
                     if fallback_dt + timedelta(days=1) < now:
-                        removed.append(key)
+                        mark_removed(key, entry)
                         continue
                 except Exception:
                     pass
             elif not any(entry.get("wallets", {}).values()):
-                removed.append(key)
+                mark_removed(key, entry)
                 continue
             cleaned[key] = entry
             continue
         if latest_dt + timedelta(hours=1) < now:
-            removed.append(key)
+            mark_removed(key, entry)
             continue
         cleaned[key] = entry
     if removed:
         log(f"[*] Cleanup: removed {len(removed)} expired: {', '.join(removed)}")
+        queue = Path(os.environ.get(
+            'NFT_EXPIRED_UNFOLLOW_QUEUE',
+            str(WORKLOAD_ROOT.parent / 'x-expired-unfollow' / 'state' / 'expired_projects.jsonl'),
+        ))
+        queue.parent.mkdir(parents=True, exist_ok=True)
+        with queue.open('a', encoding='utf-8') as fh:
+            for key, entry in removed_entries:
+                handle = str(entry.get('tweet_author_handle') or '').strip().lstrip('@')
+                if not re.fullmatch(r'[A-Za-z0-9_]{1,15}', handle):
+                    continue
+                fh.write(json.dumps({'project_key': key, 'name': entry.get('name') or key,
+                                     'handle': handle, 'expired_at': int(now.timestamp()),
+                                     'source': entry.get('source') or 'opensea'}, ensure_ascii=False) + '\n')
     return cleaned
 
 # ── format reports ─────────────────────────────────────────
