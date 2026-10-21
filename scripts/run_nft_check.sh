@@ -58,6 +58,17 @@ else
   # If still missing, allow systemd EnvironmentFile (or shell session) to provide it.
 fi
 load_env_file "$ENV_FILE"
+# Optional local-only X runtime settings. Keep cookie/proxy values outside the
+# public repository; environment variables already set by the caller win.
+X_CREDENTIALS_DIR="${X_CREDENTIALS_DIR:-${HOME}/.hermes/credentials}"
+X_PROXY_ENV_FILE="${X_PROXY_ENV_FILE:-${X_CREDENTIALS_DIR}/x-proxy.env}"
+X_COOKIES_FILE="${X_COOKIES_FILE:-${X_CREDENTIALS_DIR}/twitter-cookies.json}"
+if [ -z "${X_PROXY_URL:-}" ]; then
+  load_env_file "$X_PROXY_ENV_FILE"
+fi
+if [ -z "${TWITTER_COOKIES_FILE:-}" ] && [ -f "$X_COOKIES_FILE" ]; then
+  export TWITTER_COOKIES_FILE="$X_COOKIES_FILE"
+fi
 
 # `config/wallets.json` is the operator-controlled allowlist. Validate each
 # selected alias/address against the private canonical config before spawning.

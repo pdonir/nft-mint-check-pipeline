@@ -4,18 +4,21 @@ import asyncio
 import json
 import os
 import re
+from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import cast
+from urllib.parse import unquote, urlparse, urlsplit
 
 import httpx
-from playwright.async_api import async_playwright
+from playwright.async_api import ProxySettings, async_playwright
 
 WORKLOAD_ROOT = Path(__file__).resolve().parents[2]  # workload root
 BASE_DIR = WORKLOAD_ROOT  # alias kept for downstream usages
 CONFIG_DIR = WORKLOAD_ROOT / "config"
 STATE_DIR = WORKLOAD_ROOT / "state"
 COOKIES_FILE = os.environ.get("TWITTER_COOKIES_FILE", "/path/to/twitter_cookies.json")
+X_PROXY_URL = os.environ.get("X_PROXY_URL", "").strip()
 HOURS_WINDOW = 13
 FALLBACK_TTL = timedelta(days=1)
 OPENSEA_PUBLIC_GRACE = timedelta(hours=1)
@@ -91,6 +94,38 @@ EXCLUDED_HOSTS = {
 def load_cookies():
     with open(COOKIES_FILE) as f:
         return json.load(f)
+
+
+def playwright_proxy(url: str) -> ProxySettings | None:
+    """Convert a standard proxy URL into Playwright's proxy mapping."""
+    if not url:
+        return None
+    parsed = urlsplit(url)
+    if not parsed.scheme or not parsed.hostname or not parsed.port:
+        raise RuntimeError('X_PROXY_URL_INVALID')
+    scheme = 'socks5' if parsed.scheme == 'socks5h' else parsed.scheme
+    if scheme not in ('http', 'https', 'socks5'):
+        raise RuntimeError(f'X_PROXY_SCHEME_UNSUPPORTED:{parsed.scheme}')
+    proxy = {'server': f'{scheme}://{parsed.hostname}:{parsed.port}'}
+    if parsed.username is not None:
+        proxy['username'] = unquote(parsed.username)
+    if parsed.password is not None:
+        proxy['password'] = unquote(parsed.password)
+    return cast(ProxySettings, proxy)
+
+
+def x_block_reason(page_url: str, title: str, body_text: str):
+    """Return a stable reason when X served auth/anti-bot interstitials."""
+    low_url = (page_url or '').lower()
+    low_title = (title or '').lower()
+    low_body = (body_text or '').lower()
+    if '/account/access' in low_url:
+        return 'account_access_challenge'
+    if 'performing security verification' in low_body or 'just a moment' in low_title:
+        return 'security_verification'
+    if 'sign in' in low_body[:500]:
+        return 'not_logged_in'
+    return ''
 
 
 def normalize_url(url: str) -> str:
@@ -364,21 +399,35 @@ def build_project_buckets(unique_links):
 async def scrape_list(page, list_url, cutoff_time):
     """Scrape a single X List page for mint/checker links."""
     print(f"  scraping {list_url}...")
+    api_payloads = []
+
+    async def capture_timeline(response):
+        if 'ListLatestTweetsTimeline' not in response.url or response.status != 200:
+            return
+        try:
+            api_payloads.append(await response.json())
+        except Exception:
+            pass
+
+    page.on('response', capture_timeline)
     await page.goto(list_url, wait_until="domcontentloaded", timeout=60000)
     await page.wait_for_timeout(5000)
 
     body_text = await page.evaluate("() => document.body.innerText")
-    if "Sign in" in body_text[:500]:
-        print("    [!] NOT LOGGED IN , cookies may be expired")
-        return []
+    reason = x_block_reason(page.url, await page.title(), body_text)
+    if reason:
+        raise RuntimeError(f'X_LIST_BLOCKED:{reason}')
 
     mint_links = []
     seen_urls = set()
+    saw_tweet_articles = False
     max_scrolls = 30
     consecutive_old = 0
 
     for _ in range(max_scrolls):
         tweets = await page.query_selector_all('article[data-testid="tweet"]')
+        if tweets:
+            saw_tweet_articles = True
         found_any_new = False
 
         for tweet in tweets:
@@ -463,6 +512,59 @@ async def scrape_list(page, list_url, cutoff_time):
         await page.evaluate("window.scrollBy(0, 2000)")
         await page.wait_for_timeout(2000)
 
+    if not saw_tweet_articles:
+        # X occasionally returns a healthy GraphQL timeline but fails to hydrate
+        # tweet DOM nodes in headless Chromium. Parse that first-party response
+        # instead of treating a rendering failure as an empty list.
+        api_links = []
+        seen_tweets = set()
+
+        def walk(value):
+            if isinstance(value, dict):
+                legacy = value.get('legacy')
+                rest_id = str(value.get('rest_id') or '')
+                if isinstance(legacy, dict) and legacy.get('full_text') and legacy.get('created_at') and rest_id:
+                    tweet_dt = parsedate_to_datetime(legacy['created_at']).astimezone(timezone.utc)
+                    if tweet_dt >= cutoff_time and rest_id not in seen_tweets:
+                        seen_tweets.add(rest_id)
+                        core = value.get('core') or {}
+                        user_result = ((core.get('user_results') or {}).get('result') or {})
+                        user_core = user_result.get('core') or {}
+                        handle = user_core.get('screen_name') or ((user_result.get('legacy') or {}).get('screen_name')) or ''
+                        tweet_url = f'https://x.com/{handle}/status/{rest_id}' if handle else f'https://x.com/i/status/{rest_id}'
+                        urls = []
+                        entities = legacy.get('entities') or {}
+                        for item in entities.get('urls') or []:
+                            url = normalize_url(item.get('expanded_url') or item.get('url') or '')
+                            if url and url not in urls:
+                                urls.append(url)
+                        for url in urls:
+                            classified = classify_generic_url(url, legacy.get('full_text') or '')
+                            if not classified:
+                                continue
+                            classified.update({
+                                'tweet_time': tweet_dt.isoformat().replace('+00:00', 'Z'),
+                                'tweet_url': tweet_url,
+                                'tweet_text': legacy.get('full_text') or '',
+                                'tweet_author_handle': handle,
+                                'list_url': list_url,
+                                'project_key': classified.get('slug') or urlparse(classified['url']).netloc.lower().replace('www.', ''),
+                            })
+                            api_links.append(classified)
+                for child in value.values():
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        for payload in api_payloads:
+            walk(payload)
+        page.remove_listener('response', capture_timeline)
+        if api_payloads:
+            print(f"    [i] DOM timeline empty; GraphQL fallback found {len(api_links)} mint/checker links")
+            return api_links
+        raise RuntimeError('X_LIST_EMPTY_TIMELINE')
+    page.remove_listener('response', capture_timeline)
     return mint_links
 
 
@@ -489,28 +591,42 @@ async def main():
 
     cookies = load_cookies()
     all_links = []
+    list_failures = []
+    lists_ok = 0
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        proxy = playwright_proxy(X_PROXY_URL)
+        browser = await p.chromium.launch(headless=True, proxy=proxy)
         context = await browser.new_context()
         await context.add_cookies(cookies)
-        page = await context.new_page()
 
         for list_url in list_urls:
+            # A fresh page per list avoids X SPA/cache state leaking across
+            # navigations and intermittently suppressing timeline hydration.
+            page = await context.new_page()
             try:
                 links = await asyncio.wait_for(
                     scrape_list(page, list_url, cutoff_time), timeout=120
                 )
+                lists_ok += 1
                 all_links.extend(links)
                 print(f"    found {len(links)} mint/checker links")
             except asyncio.TimeoutError:
                 print(f"    [!] list timed out after 120s, skipping: {list_url}")
+                list_failures.append({'url': list_url, 'reason': 'timeout'})
                 continue
             except Exception as e:
                 print(f"    [!] list error, skipping: {list_url} ({e})")
+                list_failures.append({'url': list_url, 'reason': str(e)})
                 continue
+            finally:
+                await page.close()
 
         await browser.close()
+
+    if lists_ok == 0:
+        reasons = ','.join(sorted({item['reason'] for item in list_failures})) or 'unknown'
+        raise RuntimeError(f'X_SCRAPE_ALL_LISTS_FAILED:{reasons}')
 
     seen = set()
     unique_links = []
@@ -550,6 +666,13 @@ async def main():
         'opensea_slugs': [l['slug'] for l in opensea_links if l.get('slug')],
         'project_links': project_links,
         'category_counts': category_counts,
+        'list_health': {
+            'configured': len(list_urls),
+            'successful': lists_ok,
+            'failed': len(list_failures),
+            'failures': list_failures,
+            'proxy_enabled': bool(X_PROXY_URL),
+        },
     }
 
     with open(output_file, 'w') as f:
